@@ -77,7 +77,7 @@ image-ocr-to-excel/
 ---
 
 ### License
-This project is licensed under the [MIT License](LICENSE).
+This project is licensed under the [MIT License](LICENSE.txt).
 
 ---
 
@@ -88,5 +88,3 @@ Contributions are welcome! Feel free to open issues or submit pull requests.
 
 ### Contact
 If you have any questions or suggestions, feel free to reach out at `agungwah900@gmail.com`.
-
----
