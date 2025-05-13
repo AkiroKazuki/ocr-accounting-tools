@@ -88,3 +88,5 @@ Contributions are welcome! Feel free to open issues or submit pull requests.
 
 ### Contact
 If you have any questions or suggestions, feel free to reach out at `agungwah900@gmail.com`.
+
+---
