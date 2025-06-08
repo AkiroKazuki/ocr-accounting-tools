@@ -1,0 +1,5 @@
+{
+  "name": "Image Text Extractor & Organizer",
+  "description": "Upload an image to extract text using Gemini API. The extracted text is formatted as CSV, ready to be copied and used with tools like Pandas or pasted into Excel for data analysis and organization.",
+  "requestFramePermissions": []
+}

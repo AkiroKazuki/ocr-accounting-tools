@@ -16,7 +16,6 @@ This project automates the process of extracting text from images using Optical 
 ---
 
 ### Technologies Used
-- **Python**: The core programming language.
 - **OCR Library**: [Tesseract OCR](https://github.com/tesseract-ocr/tesseract) or alternatives like Google Cloud Vision API.
 - **Excel Integration**: [Pandas](https://pandas.pydata.org/) to handle data processing and Excel file creation.
 
@@ -45,26 +44,6 @@ This project automates the process of extracting text from images using Optical 
    python main.py
    ```
 3. Output Excel files will be saved in the `output_excel` directory.
-
----
-
-### Directory Structure
-```
-image-ocr-to-excel/
-├── input_images/         # Directory to store input images.
-├── output_excel/         # Directory to store output Excel files.
-├── src/                  # Source code for the project.
-│   ├── ocr.py            # Module for OCR processing.
-│   ├── excel.py          # Module for creating Excel files.
-│   ├── utils.py          # Utility functions for the project.
-│   └── main.py           # Entry point for the application.
-├── tests/                # Unit tests for the project.
-│   ├── test_ocr.py
-│   ├── test_excel.py
-│   └── test_utils.py
-├── requirements.txt      # Python dependencies.
-└── README.md             # Project documentation.
-```
 
 ---
 
