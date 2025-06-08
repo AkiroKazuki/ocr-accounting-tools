@@ -109,9 +109,6 @@ The application uses the `gemini-2.5-flash-preview-04-17` model for its multimod
 -   **Failed to Extract Text**: If the API returns an error or no text, the image might be unclear, contain no discernible text, or there might have been an issue with the API request. Check the error message for more details.
 -   **Excel Download Issues**: Ensure that your browser allows file downloads. If errors occur during Excel generation, check the console for details.
 
-## .gitignore
-
-The `.gitignore` file is included to prevent common Node.js development files (like `node_modules`), build outputs, and environment-specific files (like `.env`) from being committed to version control. This helps keep the repository clean and secure.
 
 ---
 
