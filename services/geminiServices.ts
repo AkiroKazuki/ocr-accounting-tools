@@ -1,4 +1,4 @@
-import { GoogleGenAI, GenerateContentResponse } from "@google/genai";
+import { GoogleGenerativeAI, GenerateContentResponse } from "@google/generative-ai";
 import { GEMINI_MODEL_NAME } from '../constants';
 
 // Ensure API_KEY is accessed from process.env as per instructions
@@ -10,7 +10,7 @@ if (!apiKey) {
   // The UI will handle errors if API calls fail.
 }
 
-const ai = new GoogleGenAI({ apiKey: apiKey || "MISSING_API_KEY" }); // Provide a dummy if missing to avoid constructor error, actual calls will fail.
+const ai = new GoogleGenerativeAI({ apiKey: apiKey || "MISSING_API_KEY" }); // Provide a dummy if missing to avoid constructor error, actual calls will fail.
 
 export const extractTextFromImageWithGemini = async (
   base64ImageString: string,
@@ -32,19 +32,24 @@ export const extractTextFromImageWithGemini = async (
     text: prompt,
   };
 
-  try {
-    const response: GenerateContentResponse = await ai.models.generateContent({
-      model: GEMINI_MODEL_NAME,
-      contents: { parts: [imagePart, textPart] },
+try {
+
+    const model = ai.getGenerativeModel({ model: GEMINI_MODEL_NAME });
+
+    const result = await model.generateContent([
+        prompt,
+        imagePart
+    ]);
+
       // config: {
       //   // Optional: Add any specific generation configs here
       //   // temperature: 0.7, 
       // }
-    });
+
+    const response = result.response;
     
-    // As per guidance, access text directly
-    const extractedText = response.text;
-    
+    const extractedText = response.text();
+
     if (typeof extractedText !== 'string') {
         console.warn("Gemini API response.text was not a string:", extractedText);
         throw new Error("Invalid response format from Gemini API. Expected text.");

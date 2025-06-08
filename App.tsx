@@ -1,7 +1,7 @@
 import React, { useState, useCallback, useEffect } from 'react';
 import * as XLSX from 'xlsx';
 import { ImageUploader } from './components/ImageUploader.tsx';
-import { DataTable } from './components/DataTable.tsx';
+import { DataTable } from './components/Datatable.tsx';
 import { LoadingIcon } from './components/LoadingIcon.tsx';
 import { AlertMessage } from './components/AlertMessage.tsx';
 import { extractTextFromImageWithGemini } from './services/geminiServices.ts';
