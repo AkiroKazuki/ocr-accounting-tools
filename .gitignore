@@ -18,3 +18,15 @@ pnpm-debug.log*
 # IDEs and editors
 .idea
 .vscode
+*.swp
+*.swo
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# TypeScript cache
+*.tsbuildinfo
+
+# Vite cache
+.vite

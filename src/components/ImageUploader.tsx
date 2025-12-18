@@ -1,8 +1,9 @@
 import React, { useCallback, useState } from 'react';
 
 interface ImageUploaderProps {
-     onFileSelect: (file: File | null) => void;
+     onFileSelect: (files: File[]) => void;
      disabled?: boolean;
+     multiple?: boolean;
 }
 
 const UploadFileIcon: React.FC<React.SVGProps<SVGSVGElement>> = (props) => (
@@ -12,12 +13,14 @@ const UploadFileIcon: React.FC<React.SVGProps<SVGSVGElement>> = (props) => (
 );
 
 
-export const ImageUploader: React.FC<ImageUploaderProps> = ({ onFileSelect, disabled }) => {
+export const ImageUploader: React.FC<ImageUploaderProps> = ({ onFileSelect, disabled, multiple = true }) => {
      const [dragging, setDragging] = useState(false);
 
      const handleFileChange = (event: React.ChangeEvent<HTMLInputElement>) => {
-          const file = event.target.files?.[0] || null;
-          onFileSelect(file);
+          const files = event.target.files;
+          if (files && files.length > 0) {
+               onFileSelect(Array.from(files));
+          }
      };
 
      const handleDragEnter = useCallback((e: React.DragEvent<HTMLLabelElement>) => {
@@ -36,7 +39,7 @@ export const ImageUploader: React.FC<ImageUploaderProps> = ({ onFileSelect, disa
           e.preventDefault();
           e.stopPropagation();
           if (!disabled && e.dataTransfer.items && e.dataTransfer.items.length > 0) {
-               e.dataTransfer.dropEffect = 'copy'; // Show a copy cursor
+               e.dataTransfer.dropEffect = 'copy';
           } else {
                e.dataTransfer.dropEffect = 'none';
           }
@@ -49,17 +52,23 @@ export const ImageUploader: React.FC<ImageUploaderProps> = ({ onFileSelect, disa
           if (disabled) return;
 
           if (e.dataTransfer.files && e.dataTransfer.files.length > 0) {
-               const file = e.dataTransfer.files[0];
-               // You might want to add file type validation here
-               if (file.type.startsWith('image/')) {
-                    onFileSelect(file);
+               const validFiles: File[] = [];
+               const files = Array.from(e.dataTransfer.files);
+
+               files.forEach(file => {
+                    if (file.type.startsWith('image/')) {
+                         validFiles.push(file);
+                    }
+               });
+
+               if (validFiles.length > 0) {
+                    onFileSelect(multiple ? validFiles : [validFiles[0]]);
                } else {
-                    alert("Please upload an image file (e.g., PNG, JPG, GIF, WEBP).");
-                    onFileSelect(null); // Clear any previously selected file
+                    alert("Please upload image files (e.g., PNG, JPG, GIF, WEBP).");
                }
                e.dataTransfer.clearData();
           }
-     }, [onFileSelect, disabled]);
+     }, [onFileSelect, disabled, multiple]);
 
 
      return (
@@ -77,7 +86,9 @@ export const ImageUploader: React.FC<ImageUploaderProps> = ({ onFileSelect, disa
                          <p className={`mb-2 text-sm ${dragging ? 'text-sky-300' : 'text-slate-400 group-hover:text-sky-300'}`}>
                               <span className="font-semibold">Click to upload</span> or drag and drop
                          </p>
-                         <p className="text-xs text-slate-500 group-hover:text-slate-400">PNG, JPG, GIF, WEBP (MAX. 5MB recommended)</p>
+                         <p className="text-xs text-slate-500 group-hover:text-slate-400">
+                              {multiple ? 'Multiple images supported • ' : ''}PNG, JPG, GIF, WEBP
+                         </p>
                     </div>
                     <input
                          id="image-upload-input"
@@ -86,6 +97,7 @@ export const ImageUploader: React.FC<ImageUploaderProps> = ({ onFileSelect, disa
                          className="hidden"
                          onChange={handleFileChange}
                          disabled={disabled}
+                         multiple={multiple}
                     />
                </label>
           </div>

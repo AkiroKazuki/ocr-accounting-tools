@@ -5,6 +5,7 @@ import { DataTable } from './components/DataTable.tsx';
 import { LoadingIcon } from './components/LoadingIcon.tsx';
 import { AlertMessage } from './components/AlertMessage.tsx';
 import { extractTextFromImageWithGemini } from './services/geminiServices.ts';
+import { sendScoresToJuriSheet } from './services/googleSheetsService.ts';
 import { convertFileToBase64 } from './utils/imageUtils.ts';
 import { GEMINI_MODEL_NAME } from './constants.ts';
 
@@ -33,8 +34,16 @@ const DownloadIcon: React.FC<React.SVGProps<SVGSVGElement>> = (props) => (
      </svg>
 );
 
+const ExternalLinkIcon: React.FC<React.SVGProps<SVGSVGElement>> = (props) => (
+     <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor" className="w-5 h-5 mr-2" {...props}>
+          <path strokeLinecap="round" strokeLinejoin="round" d="M13.5 6H5.25A2.25 2.25 0 003 8.25v10.5A2.25 2.25 0 005.25 21h10.5A2.25 2.25 0 0018 18.75V10.5m-10.5 6L21 3m0 0h-5.25M21 3v5.25" />
+     </svg>
+);
+
+
 
 const App: React.FC = () => {
+     // Original single-image state (for current image processing)
      const [selectedFile, setSelectedFile] = useState<File | null>(null);
      const [base64Image, setBase64Image] = useState<string | null>(null);
      const [imagePreviewUrl, setImagePreviewUrl] = useState<string | null>(null);
@@ -43,6 +52,27 @@ const App: React.FC = () => {
      const [isLoading, setIsLoading] = useState<boolean>(false);
      const [error, setError] = useState<string | null>(null);
      const [apiKeyMissing, setApiKeyMissing] = useState<boolean>(false);
+     const [kodePeserta, setKodePeserta] = useState<string | null>(null);
+     const [extractedScores, setExtractedScores] = useState<string[] | null>(null);
+     const [sheetsMessage, setSheetsMessage] = useState<string | null>(null);
+     const [isSendingToSheets, setIsSendingToSheets] = useState<boolean>(false);
+
+     // Multi-image batch state
+     interface ProcessedImage {
+          id: string;
+          file: File;
+          previewUrl: string;
+          extractedText: string | null;
+          organizedData: string[][] | null;
+          kodePeserta: string | null;
+          extractedScores: string[] | null;
+          error: string | null;
+          sheetsMessage: string | null;
+          isSendingToSheets: boolean;
+     }
+     const [processedImages, setProcessedImages] = useState<ProcessedImage[]>([]);
+     const [isProcessingBatch, setIsProcessingBatch] = useState<boolean>(false);
+     const [batchProgress, setBatchProgress] = useState<{ current: number; total: number }>({ current: 0, total: 0 });
 
      useEffect(() => {
           if (typeof import.meta.env.VITE_GEMINI_API_KEY !== 'string' || import.meta.env.VITE_GEMINI_API_KEY === '') {
@@ -52,12 +82,25 @@ const App: React.FC = () => {
      }, []);
 
 
-     const handleFileSelect = useCallback(async (file: File | null) => {
-          setSelectedFile(file);
+     // Handle multiple file selection
+     const handleFileSelect = useCallback(async (files: File[]) => {
+          // Clear previous results
           setError(null);
           setExtractedText(null);
           setOrganizedData(null);
-          if (file) {
+          setProcessedImages([]);
+
+          if (files.length === 0) {
+               setSelectedFile(null);
+               setBase64Image(null);
+               setImagePreviewUrl(null);
+               return;
+          }
+
+          // For single file, use original flow
+          if (files.length === 1) {
+               const file = files[0];
+               setSelectedFile(file);
                try {
                     const b64 = await convertFileToBase64(file);
                     setBase64Image(b64);
@@ -68,10 +111,28 @@ const App: React.FC = () => {
                     setImagePreviewUrl(null);
                     console.error(err);
                }
-          } else {
-               setBase64Image(null);
-               setImagePreviewUrl(null);
+               return;
           }
+
+          // For multiple files, set up batch processing
+          setSelectedFile(files[0]); // Show first file as preview
+          setImagePreviewUrl(URL.createObjectURL(files[0]));
+          setBatchProgress({ current: 0, total: files.length });
+
+          // Store files for batch processing
+          const initialProcessedImages: ProcessedImage[] = files.map((file, index) => ({
+               id: `img-${Date.now()}-${index}`,
+               file,
+               previewUrl: URL.createObjectURL(file),
+               extractedText: null,
+               organizedData: null,
+               kodePeserta: null,
+               extractedScores: null,
+               error: null,
+               sheetsMessage: null,
+               isSendingToSheets: false,
+          }));
+          setProcessedImages(initialProcessedImages);
      }, []);
 
      const processImage = useCallback(async () => {
@@ -93,13 +154,30 @@ const App: React.FC = () => {
           setExtractedText(null);
           setOrganizedData(null);
 
-          const prompt = `Extract all text from this image and format it as a CSV (Comma Separated Values) string.
-- Each distinct row of text or data in the image should become a new line (\\n) in the CSV.
-- Each distinct column or piece of data within a row in the image should be separated by a comma (,).
-- If the image contains a table, ensure the CSV output accurately reflects this table structure.
-- Include headers as the first line of the CSV if they are identifiable in the image.
-- Represent empty cells or missing data as an empty string between commas (e.g., "data1,,data3").
-- Output ONLY the CSV formatted string. Do not include any introductory text, explanations, or markdown fences like \`\`\`csv or \`\`\`.`;
+          const prompt = `Extract all text from this image. The image contains a grading form with:
+1. Metadata section at the top with fields like: Judul Penelitian, Nama Ketua Kelompok, Kode Peserta, Asal Sekolah
+2. A scoring table with columns: NO, Kriteria Penilaian, Bobot, Nilai (0-100)
+
+Format your response as CSV with the following structure:
+- First line: METADATA header
+- Lines 2-5: Metadata values in format "field_name,value" (extract: Kode Peserta, Judul Penelitian, Nama Ketua Kelompok, Asal Sekolah)
+- Line 6: Empty line
+- Line 7: TABLE header (NO,Kriteria Penilaian,Bobot,Nilai)
+- Remaining lines: Table data rows
+
+Example output format:
+METADATA
+Kode Peserta,IPTR08
+Judul Penelitian,Some Title
+Nama Ketua Kelompok,Some Name
+Asal Sekolah,SMP Example
+
+NO,Kriteria Penilaian,Bobot,Nilai (0-100)
+1,Korelasi Ide dan Kekomunikatifan,(30%),100
+2,Media Presentasi,(20%),80
+...
+
+Output ONLY the CSV. No markdown fences or explanations.`;
 
           try {
                const resultText = await extractTextFromImageWithGemini(base64Image, selectedFile.type, prompt);
@@ -107,20 +185,61 @@ const App: React.FC = () => {
                if (resultText) {
                     const rows = resultText.trim().split('\n');
                     const dataTable = rows.map(row => {
-                         // Basic CSV split, doesn't handle commas within quoted strings if they exist
-                         // However, Gemini is prompted to provide a clean CSV string.
                          return row.split(',');
                     });
                     setOrganizedData(dataTable);
+
+                    // Extract Kode Peserta from metadata section
+                    let foundKodePeserta: string | null = null;
+                    const scores: string[] = [];
+
+                    for (let i = 0; i < rows.length; i++) {
+                         const row = rows[i].toLowerCase();
+                         if (row.includes('kode peserta')) {
+                              const parts = rows[i].split(',');
+                              if (parts.length >= 2) {
+                                   foundKodePeserta = parts[1].trim();
+                              }
+                         }
+                    }
+
+                    // Extract scores from the table section (look for numeric values in last column)
+                    let inTableSection = false;
+                    for (let i = 0; i < rows.length; i++) {
+                         const row = rows[i].toLowerCase();
+                         if (row.includes('kriteria') && row.includes('nilai')) {
+                              inTableSection = true;
+                              continue;
+                         }
+                         if (inTableSection) {
+                              const parts = rows[i].split(',');
+                              if (parts.length >= 4) {
+                                   const nilai = parts[parts.length - 1].trim();
+                                   // Check if it's a number
+                                   if (nilai && !isNaN(Number(nilai))) {
+                                        scores.push(nilai);
+                                   }
+                              }
+                         }
+                    }
+
+                    setKodePeserta(foundKodePeserta);
+                    setExtractedScores(scores.length > 0 ? scores : null);
+                    setSheetsMessage(null);
+
+                    console.log('Extracted Kode Peserta:', foundKodePeserta);
+                    console.log('Extracted Scores:', scores);
                } else {
                     setOrganizedData([]);
+                    setKodePeserta(null);
+                    setExtractedScores(null);
                     setError("No text was extracted, or the response was empty.");
                }
           } catch (err: any) {
                console.error('Error processing image with Gemini:', err);
                if (err.message && err.message.includes('API Key is not configured')) {
                     setError('Error: API Key is not configured. Please ensure the API_KEY environment variable is set.');
-                    setApiKeyMissing(true); // Set state if API key is confirmed missing by service.
+                    setApiKeyMissing(true);
                } else if (err.message && err.message.includes('Invalid Gemini API Key')) {
                     setError('Error: Invalid Gemini API Key. Please check your configuration.');
                     setApiKeyMissing(true);
@@ -131,6 +250,8 @@ const App: React.FC = () => {
                     setError(`Failed to extract text: ${err.message || 'Unknown error'}`);
                }
                setOrganizedData(null);
+               setKodePeserta(null);
+               setExtractedScores(null);
           } finally {
                setIsLoading(false);
           }
@@ -144,9 +265,164 @@ const App: React.FC = () => {
           setOrganizedData(null);
           setError(null);
           setIsLoading(false);
-          setApiKeyMissing(false); // Reset API key missing status on clear
+          setApiKeyMissing(false);
+          setKodePeserta(null);
+          setExtractedScores(null);
+          setSheetsMessage(null);
+          setIsSendingToSheets(false);
+          // Clear batch state
+          setProcessedImages([]);
+          setIsProcessingBatch(false);
+          setBatchProgress({ current: 0, total: 0 });
           const fileInput = document.getElementById('image-upload-input') as HTMLInputElement;
           if (fileInput) fileInput.value = '';
+     };
+
+     // Process all images in batch
+     const processBatch = useCallback(async () => {
+          if (processedImages.length === 0) {
+               // Single image mode - use original processImage
+               processImage();
+               return;
+          }
+
+          setIsProcessingBatch(true);
+          setError(null);
+
+          const prompt = `Extract all text from this image. The image contains a grading form with:
+1. Metadata section at the top with fields like: Judul Penelitian, Nama Ketua Kelompok, Kode Peserta, Asal Sekolah
+2. A scoring table with columns: NO, Kriteria Penilaian, Bobot, Nilai (0-100)
+
+Format your response as CSV with the following structure:
+- First line: METADATA header
+- Lines 2-5: Metadata values in format "field_name,value" (extract: Kode Peserta, Judul Penelitian, Nama Ketua Kelompok, Asal Sekolah)
+- Line 6: Empty line
+- Line 7: TABLE header (NO,Kriteria Penilaian,Bobot,Nilai)
+- Remaining lines: Table data rows
+
+Example output format:
+METADATA
+Kode Peserta,IPTR08
+Judul Penelitian,Some Title
+Nama Ketua Kelompok,Some Name
+Asal Sekolah,SMP Example
+
+NO,Kriteria Penilaian,Bobot,Nilai (0-100)
+1,Korelasi Ide dan Kekomunikatifan,(30%),100
+2,Media Presentasi,(20%),80
+...
+
+Output ONLY the CSV. No markdown fences or explanations.`;
+
+          for (let i = 0; i < processedImages.length; i++) {
+               setBatchProgress({ current: i + 1, total: processedImages.length });
+               const img = processedImages[i];
+
+               try {
+                    const b64 = await convertFileToBase64(img.file);
+                    const resultText = await extractTextFromImageWithGemini(b64, img.file.type, prompt);
+
+                    // Parse results
+                    let foundKodePeserta: string | null = null;
+                    const scores: string[] = [];
+                    let organizedData: string[][] | null = null;
+
+                    if (resultText) {
+                         const rows = resultText.trim().split('\n');
+                         organizedData = rows.map(row => row.split(','));
+
+                         for (const row of rows) {
+                              if (row.toLowerCase().includes('kode peserta')) {
+                                   const parts = row.split(',');
+                                   if (parts.length >= 2) {
+                                        foundKodePeserta = parts[1].trim();
+                                   }
+                              }
+                         }
+
+                         let inTableSection = false;
+                         for (const row of rows) {
+                              if (row.toLowerCase().includes('kriteria') && row.toLowerCase().includes('nilai')) {
+                                   inTableSection = true;
+                                   continue;
+                              }
+                              if (inTableSection) {
+                                   const parts = row.split(',');
+                                   if (parts.length >= 4) {
+                                        const nilai = parts[parts.length - 1].trim();
+                                        if (nilai && !isNaN(Number(nilai))) {
+                                             scores.push(nilai);
+                                        }
+                                   }
+                              }
+                         }
+                    }
+
+                    setProcessedImages(prev => prev.map((p, idx) =>
+                         idx === i ? {
+                              ...p,
+                              extractedText: resultText,
+                              organizedData,
+                              kodePeserta: foundKodePeserta,
+                              extractedScores: scores.length > 0 ? scores : null,
+                              error: null,
+                         } : p
+                    ));
+               } catch (err: any) {
+                    setProcessedImages(prev => prev.map((p, idx) =>
+                         idx === i ? { ...p, error: err.message || 'Failed to process' } : p
+                    ));
+               }
+          }
+
+          setIsProcessingBatch(false);
+     }, [processedImages, processImage]);
+
+     // Handler to send scores to a Juri sheet for a specific processed image
+     const handleSendToJuriForImage = async (imageId: string, juriSheet: 'Juri1' | 'Juri2' | 'Juri3') => {
+          const img = processedImages.find(p => p.id === imageId);
+          if (!img || !img.kodePeserta || !img.extractedScores) return;
+
+          setProcessedImages(prev => prev.map(p =>
+               p.id === imageId ? { ...p, isSendingToSheets: true, sheetsMessage: null } : p
+          ));
+
+          try {
+               const message = await sendScoresToJuriSheet(juriSheet, img.kodePeserta, img.extractedScores);
+               setProcessedImages(prev => prev.map(p =>
+                    p.id === imageId ? { ...p, isSendingToSheets: false, sheetsMessage: message } : p
+               ));
+          } catch (err: any) {
+               setProcessedImages(prev => prev.map(p =>
+                    p.id === imageId ? { ...p, isSendingToSheets: false, error: err.message } : p
+               ));
+          }
+     };
+
+     // Handler to send scores to a Juri sheet
+     const handleSendToJuri = async (juriSheet: 'Juri1' | 'Juri2' | 'Juri3') => {
+          if (!kodePeserta) {
+               setError('Kode Peserta tidak ditemukan. Pastikan form memiliki Kode Peserta.');
+               return;
+          }
+          if (!extractedScores || extractedScores.length === 0) {
+               setError('Nilai tidak ditemukan. Pastikan form memiliki nilai yang dapat dibaca.');
+               return;
+          }
+
+          setIsSendingToSheets(true);
+          setError(null);
+          setSheetsMessage(null);
+
+          try {
+               const message = await sendScoresToJuriSheet(juriSheet, kodePeserta, extractedScores);
+               setSheetsMessage(message);
+          } catch (err: any) {
+               console.error('Error sending to Google Sheets:', err);
+               setError(err.message || 'Gagal mengirim ke Google Sheets');
+          } finally {
+               setIsSendingToSheets(false);
+          }
      };
 
      const handleDownloadExcel = () => {
@@ -158,7 +434,121 @@ const App: React.FC = () => {
 
           try {
                const ws_name = "ExtractedData";
-               const ws = XLSX.utils.aoa_to_sheet(organizedData);
+
+               // Transpose the data: criteria names become column headers
+               // Assuming the input has columns like: NO, Kriteria, Bobot, Nilai
+               // We want: each kriteria+bobot becomes a column header with empty rows below
+
+               const formattedData: string[][] = [];
+               const rowHeights: { [key: number]: number } = {};
+
+               // Check if this is a criteria table (has "Kriteria" or "Bobot" in headers)
+               const headerRow = organizedData[0];
+               const isCriteriaTable = headerRow.some(cell =>
+                    cell.toLowerCase().includes('kriteria') ||
+                    cell.toLowerCase().includes('bobot') ||
+                    cell.toLowerCase().includes('penilaian')
+               );
+
+               if (isCriteriaTable && organizedData.length > 1) {
+                    // Find the index of the criteria, bobot, and nilai columns
+                    let kriteriaIdx = headerRow.findIndex(cell =>
+                         cell.toLowerCase().includes('kriteria') || cell.toLowerCase().includes('penilaian')
+                    );
+                    let bobotIdx = headerRow.findIndex(cell => cell.toLowerCase().includes('bobot'));
+                    // IMPORTANT: Check if 'nilai' is at the START of the cell to avoid matching 'Penilaian'
+                    let nilaiIdx = headerRow.findIndex(cell => {
+                         const lowerCell = cell.toLowerCase().trim();
+                         return lowerCell.startsWith('nilai') || lowerCell.includes('score') || lowerCell.includes('(0-100)');
+                    });
+
+                    // Get the number of columns in the data
+                    const numColumns = Math.max(...organizedData.map(row => row.length));
+
+                    // If not found, use common column positions
+                    if (kriteriaIdx === -1) kriteriaIdx = 1;
+                    if (bobotIdx === -1) bobotIdx = 2;
+                    // Nilai is the LAST column if not found by name
+                    if (nilaiIdx === -1) nilaiIdx = numColumns - 1;
+
+                    console.log('Column indices:', { kriteriaIdx, bobotIdx, nilaiIdx, numColumns });
+                    console.log('Header row:', headerRow);
+                    console.log('First data row:', organizedData[1]);
+
+                    // Build transposed headers and data: each row's kriteria+bobot becomes a column
+                    const transposedHeaders: string[] = [];
+                    const transposedData: string[] = [];
+
+                    for (let i = 1; i < organizedData.length; i++) {
+                         const row = organizedData[i];
+                         const kriteria = (row[kriteriaIdx] || '').trim();
+                         let bobot = (row[bobotIdx] || '').trim();
+                         const nilai = (row[nilaiIdx] || '').trim();
+
+                         // Remove existing parentheses from bobot if present to avoid double wrapping
+                         bobot = bobot.replace(/^\(/, '').replace(/\)$/, '');
+
+                         // Combine kriteria and bobot like "Korelasi Ide dan Kekomunikatifan (30%)"
+                         const header = bobot ? `${kriteria} (${bobot})` : kriteria;
+                         transposedHeaders.push(header);
+                         transposedData.push(nilai);
+
+                         console.log(`Row ${i}: kriteria="${kriteria}", bobot="${bobot}", nilai="${nilai}"`);
+                    }
+
+                    console.log('Transposed headers:', transposedHeaders);
+                    console.log('Transposed data:', transposedData);
+
+                    // Add header row
+                    formattedData.push(transposedHeaders);
+                    rowHeights[0] = 50; // Header row height
+
+                    // Add the first data row with the OCR values
+                    formattedData.push(transposedData);
+                    rowHeights[1] = 60; // Data row height
+
+                    // Add 4 more empty data rows with tall height for additional entries
+                    const numEmptyRows = 4;
+                    for (let i = 0; i < numEmptyRows; i++) {
+                         formattedData.push(new Array(transposedHeaders.length).fill(''));
+                         rowHeights[formattedData.length - 1] = 120; // Tall row height
+                    }
+               } else {
+                    // Default behavior for non-criteria tables
+                    organizedData.forEach((row, index) => {
+                         formattedData.push(row);
+                         const currentRowIndex = formattedData.length - 1;
+
+                         if (index === 0) {
+                              rowHeights[currentRowIndex] = 40;
+                         } else {
+                              rowHeights[currentRowIndex] = 120;
+                         }
+
+                         if (index > 0 && index < organizedData.length - 1) {
+                              formattedData.push(new Array(row.length).fill(''));
+                              rowHeights[formattedData.length - 1] = 120;
+                         }
+                    });
+               }
+
+               const ws = XLSX.utils.aoa_to_sheet(formattedData);
+
+               // Set column widths (wider columns like in the reference image)
+               const numCols = Math.max(...formattedData.map(row => row.length));
+               const colWidths: XLSX.ColInfo[] = [];
+               for (let i = 0; i < numCols; i++) {
+                    colWidths.push({ wch: 30 }); // 30 characters wide for longer headers
+               }
+               ws['!cols'] = colWidths;
+
+               // Set row heights
+               const rowInfos: XLSX.RowInfo[] = [];
+               for (let i = 0; i < formattedData.length; i++) {
+                    rowInfos.push({ hpt: rowHeights[i] || 120 }); // height in points
+               }
+               ws['!rows'] = rowInfos;
+
                const wb = XLSX.utils.book_new();
                XLSX.utils.book_append_sheet(wb, ws, ws_name);
 
@@ -175,6 +565,66 @@ const App: React.FC = () => {
 
      };
 
+     const handleOpenInGoogleSheets = () => {
+          if (!organizedData || organizedData.length === 0) {
+               setError("No data available to open in Google Sheets.");
+               return;
+          }
+          setError(null);
+
+          try {
+               // Format data with empty rows like the Excel download
+               const formattedData: string[][] = [];
+
+               organizedData.forEach((row, index) => {
+                    formattedData.push(row);
+                    // Add empty spacing row after each data row (not after header, not after last row)
+                    if (index > 0 && index < organizedData.length - 1) {
+                         formattedData.push(new Array(row.length).fill(''));
+                    }
+               });
+
+               // Convert to CSV format
+               const csvContent = formattedData.map(row =>
+                    row.map(cell => {
+                         // Escape quotes and wrap in quotes if contains comma or newline
+                         const escaped = String(cell).replace(/"/g, '""');
+                         return `"${escaped}"`;
+                    }).join(',')
+               ).join('\n');
+
+               // Create a blob and generate a data URL
+               const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+               const dataUrl = URL.createObjectURL(blob);
+
+               // Open Google Sheets with the CSV data
+               // Using Google Sheets import URL pattern
+               const googleSheetsUrl = `https://docs.google.com/spreadsheets/d/e/2PACX-1vQRVE/create?usp=sharing`;
+
+               // Alternative: Open as a downloadable link that Google can import
+               // We'll create a new Google Sheet and let user paste the data
+               const newSheetUrl = 'https://docs.google.com/spreadsheets/create';
+
+               // Open new Google Sheet in new tab
+               const newWindow = window.open(newSheetUrl, '_blank');
+
+               // Copy CSV to clipboard so user can paste it
+               navigator.clipboard.writeText(csvContent).then(() => {
+                    alert('Data copied to clipboard! A new Google Sheet is opening. Press Ctrl+V (or Cmd+V on Mac) to paste the data.');
+               }).catch(() => {
+                    // If clipboard fails, create a downloadable CSV instead
+                    const link = document.createElement('a');
+                    link.href = dataUrl;
+                    link.download = 'data_for_sheets.csv';
+                    link.click();
+                    alert('CSV file downloaded! Open it with Google Sheets.');
+               });
+
+          } catch (error: any) {
+               console.error("Error opening in Google Sheets:", error);
+               setError(`Failed to open in Google Sheets: ${error.message || "Unknown error"}`);
+          }
+     };
 
      return (
           <div className="min-h-screen bg-gradient-to-br from-slate-900 via-slate-800 to-gray-900 text-slate-100 p-4 sm:p-6 lg:p-8 flex flex-col items-center">
@@ -201,19 +651,50 @@ const App: React.FC = () => {
                                    </div>
                               )}
 
+                              {/* Multi-image preview thumbnails */}
+                              {processedImages.length > 1 && (
+                                   <div className="mt-4 p-4 border-2 border-dashed border-slate-600 rounded-lg bg-slate-700">
+                                        <h3 className="text-lg font-semibold text-sky-400 mb-2">
+                                             📁 {processedImages.length} Images Selected
+                                        </h3>
+                                        <div className="grid grid-cols-4 gap-2 max-h-32 overflow-y-auto">
+                                             {processedImages.map((img, idx) => (
+                                                  <div key={img.id} className="relative">
+                                                       <img
+                                                            src={img.previewUrl}
+                                                            alt={`Preview ${idx + 1}`}
+                                                            className="w-full h-16 object-cover rounded"
+                                                       />
+                                                       {img.kodePeserta && (
+                                                            <span className="absolute bottom-0 left-0 right-0 bg-green-500 text-white text-xs text-center truncate">
+                                                                 {img.kodePeserta}
+                                                            </span>
+                                                       )}
+                                                  </div>
+                                             ))}
+                                        </div>
+                                   </div>
+                              )}
+
                               <div className="flex flex-col sm:flex-row space-y-3 sm:space-y-0 sm:space-x-3">
                                    <button
-                                        onClick={processImage}
-                                        disabled={!selectedFile || isLoading || apiKeyMissing}
+                                        onClick={processedImages.length > 1 ? processBatch : processImage}
+                                        disabled={!selectedFile || isLoading || isProcessingBatch || apiKeyMissing}
                                         className="w-full flex items-center justify-center px-6 py-3 bg-sky-500 hover:bg-sky-600 text-white font-semibold rounded-lg shadow-md transition-colors duration-150 ease-in-out disabled:opacity-50 disabled:cursor-not-allowed focus:outline-none focus:ring-2 focus:ring-sky-400 focus:ring-opacity-75"
-                                        aria-label={isLoading ? 'Processing image' : 'Extract and organize text from image'}
+                                        aria-label={isLoading || isProcessingBatch ? 'Processing images' : 'Extract and organize text from images'}
                                    >
-                                        {isLoading ? <LoadingIcon className="w-5 h-5 mr-2" /> : <ProcessIcon />}
-                                        {isLoading ? 'Processing...' : 'Extract & Organize Text'}
+                                        {(isLoading || isProcessingBatch) ? <LoadingIcon className="w-5 h-5 mr-2" /> : <ProcessIcon />}
+                                        {isProcessingBatch
+                                             ? `Processing ${batchProgress.current}/${batchProgress.total}...`
+                                             : isLoading
+                                                  ? 'Processing...'
+                                                  : processedImages.length > 1
+                                                       ? `Extract All (${processedImages.length})`
+                                                       : 'Extract & Organize Text'}
                                    </button>
                                    <button
                                         onClick={handleClear}
-                                        disabled={isLoading && (!selectedFile && !extractedText)}
+                                        disabled={(isLoading || isProcessingBatch) && (!selectedFile && !extractedText)}
                                         className="w-full sm:w-auto flex items-center justify-center px-6 py-3 bg-rose-500 hover:bg-rose-600 text-white font-semibold rounded-lg shadow-md transition-colors duration-150 ease-in-out disabled:opacity-50 disabled:cursor-not-allowed focus:outline-none focus:ring-2 focus:ring-rose-400 focus:ring-opacity-75"
                                         aria-label="Clear all selections and results"
                                    >
@@ -247,13 +728,13 @@ const App: React.FC = () => {
                                              className="w-full h-40 p-3 bg-slate-800 border border-slate-600 rounded-md text-slate-200 text-sm font-mono focus:ring-emerald-500 focus:border-emerald-500"
                                              placeholder="Extracted text will appear here in CSV format..."
                                         />
-                                        <div className="mt-3 grid grid-cols-1 sm:grid-cols-2 gap-3">
+                                        <div className="mt-3 grid grid-cols-1 sm:grid-cols-3 gap-3">
                                              <button
                                                   onClick={() => navigator.clipboard.writeText(extractedText)}
                                                   className="w-full flex items-center justify-center px-4 py-2 bg-emerald-500 hover:bg-emerald-600 text-white font-medium rounded-md transition-colors duration-150 ease-in-out focus:outline-none focus:ring-2 focus:ring-emerald-400 focus:ring-opacity-75"
                                                   aria-label="Copy CSV data to clipboard"
                                              >
-                                                  Copy CSV to Clipboard
+                                                  Copy CSV
                                              </button>
                                              <button
                                                   onClick={handleDownloadExcel}
@@ -262,9 +743,61 @@ const App: React.FC = () => {
                                                   aria-label="Download extracted data as Excel file"
                                              >
                                                   <DownloadIcon />
-                                                  Download as Excel
+                                                  Excel
+                                             </button>
+                                             <button
+                                                  onClick={handleOpenInGoogleSheets}
+                                                  disabled={!organizedData || organizedData.length === 0 || isLoading}
+                                                  className="w-full flex items-center justify-center px-4 py-2 bg-blue-500 hover:bg-blue-600 text-white font-medium rounded-md transition-colors duration-150 ease-in-out disabled:opacity-50 disabled:cursor-not-allowed focus:outline-none focus:ring-2 focus:ring-blue-400 focus:ring-opacity-75"
+                                                  aria-label="Open extracted data in Google Sheets"
+                                             >
+                                                  <ExternalLinkIcon />
+                                                  Google Sheets
                                              </button>
                                         </div>
+
+                                        {/* Juri Sheets Section */}
+                                        {kodePeserta && extractedScores && extractedScores.length > 0 && (
+                                             <div className="mt-4 p-4 bg-slate-600 rounded-lg">
+                                                  <h4 className="text-sm font-semibold text-amber-400 mb-2">
+                                                       📝 Kirim ke Google Sheets
+                                                  </h4>
+                                                  <p className="text-xs text-slate-300 mb-3">
+                                                       Kode Peserta: <span className="font-bold text-white">{kodePeserta}</span> |
+                                                       Nilai: <span className="font-bold text-white">{extractedScores.join(', ')}</span>
+                                                  </p>
+                                                  <div className="grid grid-cols-3 gap-2">
+                                                       <button
+                                                            onClick={() => handleSendToJuri('Juri1')}
+                                                            disabled={isSendingToSheets}
+                                                            className="w-full flex items-center justify-center px-3 py-2 bg-amber-500 hover:bg-amber-600 text-white text-sm font-medium rounded-md transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                                                       >
+                                                            {isSendingToSheets ? '...' : 'Juri 1'}
+                                                       </button>
+                                                       <button
+                                                            onClick={() => handleSendToJuri('Juri2')}
+                                                            disabled={isSendingToSheets}
+                                                            className="w-full flex items-center justify-center px-3 py-2 bg-orange-500 hover:bg-orange-600 text-white text-sm font-medium rounded-md transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                                                       >
+                                                            {isSendingToSheets ? '...' : 'Juri 2'}
+                                                       </button>
+                                                       <button
+                                                            onClick={() => handleSendToJuri('Juri3')}
+                                                            disabled={isSendingToSheets}
+                                                            className="w-full flex items-center justify-center px-3 py-2 bg-red-500 hover:bg-red-600 text-white text-sm font-medium rounded-md transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                                                       >
+                                                            {isSendingToSheets ? '...' : 'Juri 3'}
+                                                       </button>
+                                                  </div>
+                                             </div>
+                                        )}
+
+                                        {/* Success Message for Sheets */}
+                                        {sheetsMessage && (
+                                             <div className="mt-3 p-3 bg-green-600 rounded-md text-white text-sm">
+                                                  ✅ {sheetsMessage}
+                                             </div>
+                                        )}
                                    </div>
                               )}
 
@@ -275,10 +808,81 @@ const App: React.FC = () => {
                                    </div>
                               )}
 
-                              {!isLoading && !extractedText && !error && !imagePreviewUrl && (
+                              {!isLoading && !extractedText && !error && !imagePreviewUrl && processedImages.length === 0 && (
                                    <div className="flex flex-col items-center justify-center p-8 bg-slate-700 rounded-lg min-h-[200px] border-2 border-dashed border-slate-600">
                                         <UploadIcon className="w-12 h-12 text-slate-500 mb-4" />
-                                        <p className="text-slate-400 text-center">Upload an image and click "Extract & Organize Text" to see the results here.</p>
+                                        <p className="text-slate-400 text-center">Upload images and click "Extract" to see the results here.</p>
+                                   </div>
+                              )}
+
+                              {/* Batch Processing Results */}
+                              {processedImages.length > 0 && processedImages.some(p => p.extractedText || p.error) && (
+                                   <div className="space-y-4">
+                                        <h3 className="text-lg font-semibold text-emerald-400">
+                                             📊 Batch Results ({processedImages.filter(p => p.extractedText).length}/{processedImages.length} processed)
+                                        </h3>
+                                        {processedImages.map((img, idx) => (
+                                             <div key={img.id} className="p-4 bg-slate-700 rounded-lg shadow">
+                                                  <div className="flex items-start gap-3">
+                                                       <img
+                                                            src={img.previewUrl}
+                                                            alt={`Result ${idx + 1}`}
+                                                            className="w-16 h-16 object-cover rounded flex-shrink-0"
+                                                       />
+                                                       <div className="flex-1 min-w-0">
+                                                            <div className="flex items-center gap-2 mb-1">
+                                                                 <span className="text-sm font-medium text-slate-300 truncate">
+                                                                      {img.file.name}
+                                                                 </span>
+                                                                 {img.kodePeserta && (
+                                                                      <span className="px-2 py-0.5 bg-sky-500 text-white text-xs rounded">
+                                                                           {img.kodePeserta}
+                                                                      </span>
+                                                                 )}
+                                                            </div>
+
+                                                            {img.error && (
+                                                                 <p className="text-red-400 text-sm">❌ {img.error}</p>
+                                                            )}
+
+                                                            {img.extractedScores && img.extractedScores.length > 0 && (
+                                                                 <>
+                                                                      <p className="text-xs text-slate-400 mb-2">
+                                                                           Nilai: <span className="text-white">{img.extractedScores.join(', ')}</span>
+                                                                      </p>
+                                                                      <div className="flex gap-2">
+                                                                           <button
+                                                                                onClick={() => handleSendToJuriForImage(img.id, 'Juri1')}
+                                                                                disabled={img.isSendingToSheets}
+                                                                                className="px-3 py-1 bg-amber-500 hover:bg-amber-600 text-white text-xs font-medium rounded transition-colors disabled:opacity-50"
+                                                                           >
+                                                                                {img.isSendingToSheets ? '...' : 'Juri 1'}
+                                                                           </button>
+                                                                           <button
+                                                                                onClick={() => handleSendToJuriForImage(img.id, 'Juri2')}
+                                                                                disabled={img.isSendingToSheets}
+                                                                                className="px-3 py-1 bg-orange-500 hover:bg-orange-600 text-white text-xs font-medium rounded transition-colors disabled:opacity-50"
+                                                                           >
+                                                                                {img.isSendingToSheets ? '...' : 'Juri 2'}
+                                                                           </button>
+                                                                           <button
+                                                                                onClick={() => handleSendToJuriForImage(img.id, 'Juri3')}
+                                                                                disabled={img.isSendingToSheets}
+                                                                                className="px-3 py-1 bg-red-500 hover:bg-red-600 text-white text-xs font-medium rounded transition-colors disabled:opacity-50"
+                                                                           >
+                                                                                {img.isSendingToSheets ? '...' : 'Juri 3'}
+                                                                           </button>
+                                                                      </div>
+                                                                 </>
+                                                            )}
+
+                                                            {img.sheetsMessage && (
+                                                                 <p className="text-green-400 text-xs mt-2">✅ {img.sheetsMessage}</p>
+                                                            )}
+                                                       </div>
+                                                  </div>
+                                             </div>
+                                        ))}
                                    </div>
                               )}
                          </div>
